@@ -21,15 +21,22 @@ pub async fn serve_static_app(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let response = if uri.path() == "/healthz" {
-        text_response(StatusCode::OK, "ok\n")
+    let (response, app_id) = if uri.path() == "/healthz" {
+        (text_response(StatusCode::OK, "ok\n"), None)
     } else {
         match build_static_response(&store, &host, uri.path()) {
-            Ok(response) => response,
-            Err(status) => simple_response(status, status.canonical_reason().unwrap_or("error")),
+            Ok((response, app_id)) => (response, Some(app_id)),
+            Err(status) => (
+                simple_response(status, status.canonical_reason().unwrap_or("error")),
+                None,
+            ),
         }
     };
-    store.record_red(started.elapsed().as_millis(), response.status().as_u16());
+    store.record_red(
+        app_id,
+        started.elapsed().as_millis(),
+        response.status().as_u16(),
+    );
     response
 }
 
@@ -37,7 +44,7 @@ fn build_static_response(
     store: &Store,
     host: &str,
     request_path: &str,
-) -> Result<Response<Body>, StatusCode> {
+) -> Result<(Response<Body>, uuid::Uuid), StatusCode> {
     let app = store.find_app_for_host(host).or_else(|| {
         let config = store.read();
         config.apps.into_iter().find(|app| app.hostnames.is_empty())
@@ -64,9 +71,10 @@ fn build_static_response(
             builder = builder.header("x-popovic-modified-unix", duration.as_secs().to_string());
         }
     }
-    builder
+    let response = builder
         .body(Body::from(bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((response, app.id))
 }
 
 fn resolve_path(root: &Path, request_path: &str) -> Option<PathBuf> {

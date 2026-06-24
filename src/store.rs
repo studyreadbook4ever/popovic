@@ -111,25 +111,27 @@ impl Store {
             .as_ref()
             .map(|bucket| bucket.host.clone())
             .unwrap_or_default();
-        let red = latest
-            .as_ref()
-            .map(|bucket| bucket.red.clone())
-            .unwrap_or_default();
-
         let running_apps = config
             .apps
             .iter()
-            .map(|app| AppSnapshot {
-                id: app.id,
-                name: app.name.clone(),
-                domains: app.hostnames.clone(),
-                status: app_status(app),
-                last_deploy: app
-                    .last_deploy_at
-                    .map(|time| time.to_rfc3339())
-                    .unwrap_or_else(|| "never".to_string()),
-                requests_5m: red.requests,
-                errors_5m: red.errors,
+            .map(|app| {
+                let app_red = latest
+                    .as_ref()
+                    .and_then(|bucket| bucket.app_red.get(&app.id))
+                    .cloned()
+                    .unwrap_or_default();
+                AppSnapshot {
+                    id: app.id,
+                    name: app.name.clone(),
+                    domains: app.hostnames.clone(),
+                    status: app_status(app),
+                    last_deploy: app
+                        .last_deploy_at
+                        .map(|time| time.to_rfc3339())
+                        .unwrap_or_else(|| "never".to_string()),
+                    requests_5m: app_red.requests,
+                    errors_5m: app_red.errors,
+                }
             })
             .collect();
 
@@ -151,16 +153,14 @@ impl Store {
         }
     }
 
-    pub fn record_red(&self, elapsed_ms: u128, status: u16) {
+    pub fn record_red(&self, app_id: Option<Uuid>, elapsed_ms: u128, status: u16) {
         let _ = self.update(|config| {
             let bucket = ensure_current_bucket(config);
-            bucket.red.requests += 1;
-            if status >= 400 {
-                bucket.red.errors += 1;
+            record_red_metrics(&mut bucket.red, elapsed_ms, status);
+            if let Some(app_id) = app_id {
+                let app_red = bucket.app_red.entry(app_id).or_default();
+                record_red_metrics(app_red, elapsed_ms, status);
             }
-            let elapsed = elapsed_ms as f32;
-            bucket.red.p95_ms = bucket.red.p95_ms.max(elapsed);
-            bucket.red.p99_ms = bucket.red.p99_ms.max(elapsed);
         });
     }
 
@@ -190,9 +190,20 @@ fn ensure_current_bucket(config: &mut Config) -> &mut MetricBucket {
             start: bucket_start,
             host: Default::default(),
             red: RedMetrics::default(),
+            app_red: Default::default(),
         });
     }
     config.metric_buckets.last_mut().expect("bucket exists")
+}
+
+fn record_red_metrics(metrics: &mut RedMetrics, elapsed_ms: u128, status: u16) {
+    metrics.requests += 1;
+    if status >= 400 {
+        metrics.errors += 1;
+    }
+    let elapsed = elapsed_ms as f32;
+    metrics.p95_ms = metrics.p95_ms.max(elapsed);
+    metrics.p99_ms = metrics.p99_ms.max(elapsed);
 }
 
 fn prune_config(config: &mut Config) {

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub const RETENTION_DAYS: i64 = 7;
@@ -171,6 +172,8 @@ pub struct MetricBucket {
     pub start: DateTime<Utc>,
     pub host: HostMetrics,
     pub red: RedMetrics,
+    #[serde(default)]
+    pub app_red: BTreeMap<Uuid, RedMetrics>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
