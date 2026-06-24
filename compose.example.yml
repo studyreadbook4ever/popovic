@@ -1,0 +1,21 @@
+services:
+  popovic:
+    build: .
+    container_name: popovic
+    restart: unless-stopped
+    environment:
+      POPOVIC_HOME: /data
+      POPOVIC_DASHBOARD_ADDR: 0.0.0.0:7626
+      POPOVIC_STATIC_ADDR: 0.0.0.0:80
+      POPOVIC_BOOTSTRAP: "1"
+      POPOVIC_BOOTSTRAP_REDEPLOY: "1"
+      POPOVIC_SITE_HOSTS: ""
+    volumes:
+      - popovic_data:/data
+      - ./examples/basic-site:/site:ro
+    ports:
+      - "127.0.0.1:7626:7626"
+      - "127.0.0.1:7627:80"
+
+volumes:
+  popovic_data:
