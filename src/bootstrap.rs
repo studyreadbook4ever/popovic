@@ -1,7 +1,7 @@
 use crate::{
     deploy,
     models::{Config, StaticApp},
-    store::Store,
+    store::{Store, normalize_hostname},
 };
 use std::{
     env, fs, io,
@@ -122,9 +122,8 @@ fn hostnames_for(path: &Path, env_name: &str) -> Vec<String> {
 fn split_hostnames(value: &str) -> Vec<String> {
     value
         .split([',', '\n'])
-        .map(str::trim)
+        .map(normalize_hostname)
         .filter(|item| !item.is_empty())
-        .map(str::to_string)
         .collect()
 }
 

@@ -184,6 +184,15 @@ pub const INDEX: &str = r#"<!doctype html>
       return response.json();
     }
     function formBody(form) { return new URLSearchParams(new FormData(form)); }
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[character]);
+    }
     async function refresh() {
       const status = await api('/api/status');
       document.getElementById('running-count').textContent = status.running_apps.length;
@@ -191,9 +200,12 @@ pub const INDEX: &str = r#"<!doctype html>
       document.getElementById('tunnel-detail').textContent = `${status.tunnel_status.route_count} routes`;
       document.getElementById('cpu').textContent = `${status.cpu_percent.toFixed(0)}%`;
       document.getElementById('ram').textContent = `${status.ram_percent.toFixed(0)}%`;
-      document.getElementById('alerts').innerHTML = status.alerts.length ? status.alerts.map(a => `<div class="alert ${a.severity === 'Critical' ? 'critical' : ''}"><strong>${a.source}</strong><br>${a.message}</div>`).join('') : '<div class="muted">No alerts</div>';
-      document.getElementById('apps').innerHTML = status.running_apps.map(app => `<tr><td>${app.name}</td><td>${app.domains.join('<br>') || '-'}</td><td>${app.status}</td><td>${app.last_deploy}</td><td>${app.requests_5m}</td><td>${app.errors_5m}</td></tr>`).join('');
-      document.getElementById('agent-app').innerHTML = status.running_apps.map(app => `<option value="${app.id}">${app.name}</option>`).join('');
+      document.getElementById('alerts').innerHTML = status.alerts.length ? status.alerts.map(a => `<div class="alert ${a.severity === 'Critical' ? 'critical' : ''}"><strong>${escapeHtml(a.source)}</strong><br>${escapeHtml(a.message)}</div>`).join('') : '<div class="muted">No alerts</div>';
+      document.getElementById('apps').innerHTML = status.running_apps.map(app => {
+        const domains = app.domains.map(escapeHtml).join('<br>') || '-';
+        return `<tr><td>${escapeHtml(app.name)}</td><td>${domains}</td><td>${escapeHtml(app.status)}</td><td>${escapeHtml(app.last_deploy)}</td><td>${app.requests_5m}</td><td>${app.errors_5m}</td></tr>`;
+      }).join('');
+      document.getElementById('agent-app').innerHTML = status.running_apps.map(app => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join('');
       drawChart(status.use_red);
       refreshTasks();
     }
@@ -220,7 +232,12 @@ pub const INDEX: &str = r#"<!doctype html>
     }
     async function refreshTasks() {
       const tasks = await api('/api/tasks');
-      document.getElementById('tasks').innerHTML = tasks.map(task => `<div class="panel task"><h2>${task.status}</h2><p>${task.plan}</p>${task.error ? `<p class="alert critical">${task.error}</p>` : ''}<pre>${task.diff || 'No diff'}</pre><p><strong>GitHub:</strong> ${task.github_action.summary}</p><p><strong>Cloudflare:</strong> ${task.cloudflare_action.summary}</p><div class="actions">${task.status === 'Proposed' ? `<button class="button primary" onclick="approve('${task.id}')">Approve</button><button class="button" onclick="rejectTask('${task.id}')">Reject</button>` : ''}</div></div>`).join('');
+      document.getElementById('tasks').innerHTML = tasks.map(task => {
+        const actions = task.status === 'Proposed'
+          ? `<button class="button primary" onclick="approve('${escapeHtml(task.id)}')">Approve</button><button class="button" onclick="rejectTask('${escapeHtml(task.id)}')">Reject</button>`
+          : '';
+        return `<div class="panel task"><h2>${escapeHtml(task.status)}</h2><p>${escapeHtml(task.plan)}</p>${task.error ? `<p class="alert critical">${escapeHtml(task.error)}</p>` : ''}<pre>${escapeHtml(task.diff || 'No diff')}</pre><p><strong>GitHub:</strong> ${escapeHtml(task.github_action.summary)}</p><p><strong>Cloudflare:</strong> ${escapeHtml(task.cloudflare_action.summary)}</p><div class="actions">${actions}</div></div>`;
+      }).join('');
     }
     async function approve(id) { await api(`/api/tasks/${id}/approve`, { method: 'POST' }); refresh(); }
     async function rejectTask(id) { await api(`/api/tasks/${id}/reject`, { method: 'POST' }); refresh(); }

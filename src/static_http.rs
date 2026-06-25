@@ -10,6 +10,11 @@ use std::{
     time::{Instant, UNIX_EPOCH},
 };
 
+struct StaticReply {
+    response: Response<Body>,
+    app_id: Option<uuid::Uuid>,
+}
+
 pub async fn serve_static_app(
     State(store): State<Store>,
     headers: HeaderMap,
@@ -21,44 +26,44 @@ pub async fn serve_static_app(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let (response, app_id) = if uri.path() == "/healthz" {
-        (text_response(StatusCode::OK, "ok\n"), None)
-    } else {
-        match build_static_response(&store, &host, uri.path()) {
-            Ok((response, app_id)) => (response, Some(app_id)),
-            Err(status) => (
-                simple_response(status, status.canonical_reason().unwrap_or("error")),
-                None,
-            ),
+    let reply = if uri.path() == "/healthz" {
+        StaticReply {
+            response: text_response(StatusCode::OK, "ok\n"),
+            app_id: None,
         }
+    } else {
+        build_static_response(&store, &host, uri.path())
     };
     store.record_red(
-        app_id,
+        reply.app_id,
         started.elapsed().as_millis(),
-        response.status().as_u16(),
+        reply.response.status().as_u16(),
     );
-    response
+    reply.response
 }
 
-fn build_static_response(
-    store: &Store,
-    host: &str,
-    request_path: &str,
-) -> Result<(Response<Body>, uuid::Uuid), StatusCode> {
+fn build_static_response(store: &Store, host: &str, request_path: &str) -> StaticReply {
     let app = store.find_app_for_host(host).or_else(|| {
         let config = store.read();
         config.apps.into_iter().find(|app| app.hostnames.is_empty())
     });
     let Some(app) = app else {
-        return Err(StatusCode::NOT_FOUND);
+        return error_reply(StatusCode::NOT_FOUND, None);
     };
+    let app_id = Some(app.id);
     let Some(root) = store.current_release_dir(&app) else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return error_reply(StatusCode::SERVICE_UNAVAILABLE, app_id);
     };
 
-    let path = resolve_path(&root, request_path).ok_or(StatusCode::NOT_FOUND)?;
-    let bytes = fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
-    let metadata = fs::metadata(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let Some(path) = resolve_path(&root, request_path) else {
+        return error_reply(StatusCode::NOT_FOUND, app_id);
+    };
+    let Ok(bytes) = fs::read(&path) else {
+        return error_reply(StatusCode::NOT_FOUND, app_id);
+    };
+    let Ok(metadata) = fs::metadata(&path) else {
+        return error_reply(StatusCode::NOT_FOUND, app_id);
+    };
     let mime = mime_for(&path);
 
     let mut builder = Response::builder()
@@ -71,10 +76,17 @@ fn build_static_response(
             builder = builder.header("x-popovic-modified-unix", duration.as_secs().to_string());
         }
     }
-    let response = builder
-        .body(Body::from(bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((response, app.id))
+    match builder.body(Body::from(bytes)) {
+        Ok(response) => StaticReply { response, app_id },
+        Err(_) => error_reply(StatusCode::INTERNAL_SERVER_ERROR, app_id),
+    }
+}
+
+fn error_reply(status: StatusCode, app_id: Option<uuid::Uuid>) -> StaticReply {
+    StaticReply {
+        response: simple_response(status, status.canonical_reason().unwrap_or("error")),
+        app_id,
+    }
 }
 
 fn resolve_path(root: &Path, request_path: &str) -> Option<PathBuf> {

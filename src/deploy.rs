@@ -33,15 +33,10 @@ pub fn deploy_app(store: &Store, app_id: Uuid) -> io::Result<()> {
         .find_app(app_id)
         .ok_or_else(|| missing("app not found"))?;
     let source = prepare_source(store, &app)?;
-    let release_id = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let release_id = new_release_id();
     let release_dir = store.app_release_dir(&app, &release_id);
-    fs::create_dir_all(&release_dir)?;
 
-    let source_subdir = if app.repo_subdir.trim().is_empty() {
-        source
-    } else {
-        source.join(app.repo_subdir.trim())
-    };
+    let source_subdir = safe_source_subdir(&source, &app.repo_subdir)?;
     validate_static_source(&source_subdir)?;
     copy_static_tree(&source_subdir, &release_dir)?;
 
@@ -83,7 +78,7 @@ pub fn apply_file_changes(
     let current_dir = store
         .current_release_dir(&app)
         .ok_or_else(|| missing("app has no current release"))?;
-    let release_id = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let release_id = new_release_id();
     let release_dir = store.app_release_dir(&app, &release_id);
     copy_static_tree(&current_dir, &release_dir)?;
 
@@ -128,6 +123,26 @@ fn prepare_source(store: &Store, app: &StaticApp) -> io::Result<PathBuf> {
     Ok(repo_dir)
 }
 
+fn new_release_id() -> String {
+    let suffix = Uuid::new_v4().simple().to_string();
+    format!("{}-{}", Utc::now().format("%Y%m%d%H%M%S%3f"), &suffix[..8])
+}
+
+fn safe_source_subdir(source: &Path, repo_subdir: &str) -> io::Result<PathBuf> {
+    let raw = repo_subdir.trim();
+    if Path::new(raw).is_absolute() {
+        return Err(missing("repo subdir must stay inside the source root"));
+    }
+    let trimmed = raw.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(source.to_path_buf());
+    }
+    if trimmed.contains("..") || trimmed.contains('\\') {
+        return Err(missing("repo subdir must stay inside the source root"));
+    }
+    Ok(source.join(trimmed))
+}
+
 fn authenticated_github_url(store: &Store, repo_url: &str) -> String {
     let config = store.read();
     let token = secret::open(&config.settings.github_oauth_token_sealed);
@@ -146,7 +161,7 @@ fn run_git<P: AsRef<Path>>(dir: P, args: &[&str]) -> io::Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = sanitize_command_output(&String::from_utf8_lossy(&output.stderr));
     Err(io::Error::new(
         ErrorKind::Other,
         format!("git command failed: {stderr}"),
@@ -172,10 +187,14 @@ fn copy_static_tree(source: &Path, target: &Path) -> io::Result<()> {
         if file_name == ".git" {
             continue;
         }
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let target_path = target.join(file_name);
-        if source_path.is_dir() {
+        if file_type.is_dir() {
             copy_static_tree(&source_path, &target_path)?;
-        } else if allowed_static_file(&source_path) {
+        } else if file_type.is_file() && allowed_static_file(&source_path) {
             fs::copy(&source_path, &target_path)?;
         }
     }
@@ -232,10 +251,26 @@ pub fn allowed_static_file(path: &Path) -> bool {
 
 fn safe_site_path(root: &Path, relative: &str) -> io::Result<PathBuf> {
     let relative = relative.trim_start_matches('/');
-    if relative.contains("..") {
+    if relative.trim().is_empty() || relative.contains("..") || relative.contains('\\') {
         return Err(missing("path traversal is not allowed"));
     }
     Ok(root.join(relative))
+}
+
+fn sanitize_command_output(value: &str) -> String {
+    let mut output = value.to_string();
+    let prefix = "https://x-access-token:";
+    let mut cursor = 0;
+    while let Some(relative_start) = output[cursor..].find(prefix) {
+        let token_start = cursor + relative_start + prefix.len();
+        let Some(relative_end) = output[token_start..].find('@') else {
+            break;
+        };
+        let token_end = token_start + relative_end;
+        output.replace_range(token_start..token_end, "***");
+        cursor = token_start + 3;
+    }
+    output
 }
 
 fn replace_app(config: &mut crate::models::Config, app: StaticApp) {
@@ -260,4 +295,37 @@ pub fn deploy_failed(store: &Store, app_id: Uuid, error: String) {
         }
         config.alerts.push(Alert::warning("deploy", error));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{new_release_id, safe_source_subdir, sanitize_command_output};
+    use std::path::Path;
+
+    #[test]
+    fn release_ids_do_not_collide_under_fast_redeploys() {
+        let first = new_release_id();
+        let second = new_release_id();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn source_subdir_cannot_escape_source_root() {
+        let source = Path::new("/site");
+        assert_eq!(
+            safe_source_subdir(source, "public/assets").unwrap(),
+            Path::new("/site/public/assets")
+        );
+        assert!(safe_source_subdir(source, "../private").is_err());
+        assert!(safe_source_subdir(source, "/etc").is_err());
+    }
+
+    #[test]
+    fn git_errors_do_not_echo_embedded_tokens() {
+        let output = sanitize_command_output(
+            "fatal: https://x-access-token:secret-value@github.com/user/repo failed",
+        );
+        assert!(!output.contains("secret-value"));
+        assert!(output.contains("x-access-token:***@github.com"));
+    }
 }

@@ -70,6 +70,13 @@ impl Store {
         Ok(result)
     }
 
+    fn update_memory<R>(&self, f: impl FnOnce(&mut Config) -> R) -> R {
+        let mut config = self.inner.write().expect("store lock poisoned");
+        let result = f(&mut config);
+        prune_config(&mut config);
+        result
+    }
+
     pub fn save(&self) -> io::Result<()> {
         let config = self.inner.read().expect("store lock poisoned").clone();
         let content = to_pretty_json(&config)?;
@@ -92,11 +99,11 @@ impl Store {
     }
 
     pub fn find_app_for_host(&self, host: &str) -> Option<StaticApp> {
-        let host_without_port = host.split(':').next().unwrap_or(host);
+        let host_without_port = normalize_hostname(host);
         self.read().apps.into_iter().find(|app| {
             app.hostnames
                 .iter()
-                .any(|candidate| candidate == host_without_port)
+                .any(|candidate| normalize_hostname(candidate) == host_without_port)
         })
     }
 
@@ -154,7 +161,7 @@ impl Store {
     }
 
     pub fn record_red(&self, app_id: Option<Uuid>, elapsed_ms: u128, status: u16) {
-        let _ = self.update(|config| {
+        self.update_memory(|config| {
             let bucket = ensure_current_bucket(config);
             record_red_metrics(&mut bucket.red, elapsed_ms, status);
             if let Some(app_id) = app_id {
@@ -252,5 +259,35 @@ pub fn safe_name(name: &str) -> String {
         "app".to_string()
     } else {
         out
+    }
+}
+
+pub fn normalize_hostname(host: &str) -> String {
+    let trimmed = host.trim();
+    let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        trimmed.split(':').next().unwrap_or(trimmed)
+    };
+    without_port
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_hostname, safe_name};
+
+    #[test]
+    fn normalizes_host_headers_for_routing() {
+        assert_eq!(normalize_hostname("Example.COM:443"), "example.com");
+        assert_eq!(normalize_hostname("example.com."), "example.com");
+        assert_eq!(normalize_hostname("[::1]:7627"), "::1");
+    }
+
+    #[test]
+    fn safe_name_falls_back_for_symbol_only_names() {
+        assert_eq!(safe_name("!!!"), "app");
     }
 }
